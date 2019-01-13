@@ -1064,37 +1064,30 @@ impl<EF: ExtraTokenFields, TT: TokenType, TE: ErrorResponseType> Client<EF, TT, 
             params.push(("redirect_uri", redirect_url.as_str()));
         }
 
-        let form =
-            url::form_urlencoded::Serializer::new(String::new())
-                .extend_pairs(params)
-                .finish();
-
         let mut response;
         if let Some((username, password)) = basic_auth {
             response = client
                 .post(&token_url.to_string()[..])
                 .basic_auth(username, password)
-                .form(&form)
+                .form(&params)
                 .send()?;
         } else {
             response = client
                 .post(&token_url.to_string()[..])
-                .form(&form)
+                .form(&params)
                 .send()?;
         }
 
-        let mut data = Vec::new();
-        if response.status().is_success() {
-            ::std::io::copy(&mut response, &mut data).unwrap();
-        }
-
         let http_status = response.status().as_u16() as u32;
-        let content_type = response.headers().get(reqwest::header::CONTENT_TYPE).unwrap();
+        let content_type: Option<String> = match response.headers().get(reqwest::header::CONTENT_TYPE) {
+            Some(content_type) => Some(content_type.to_str().unwrap().into()),
+            None => None,
+        };
 
         Ok(RequestTokenResponse{
             http_status,
-            content_type: Some(content_type.to_str().unwrap().into()),
-            response_body: data,
+            content_type: content_type,
+            response_body: response.text()?.into(),
         })
     }
 
