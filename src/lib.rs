@@ -211,7 +211,7 @@
 //!
 
 extern crate base64;
-extern crate curl;
+extern crate reqwest;
 extern crate failure;
 extern crate rand;
 extern crate serde;
@@ -221,13 +221,11 @@ extern crate sha2;
 extern crate url;
 
 use std::convert::Into;
-use std::io::Read;
 use std::fmt::{Debug, Display, Error as FormatterError, Formatter};
 use std::marker::{Send, Sync, PhantomData};
 use std::ops::Deref;
 use std::time::Duration;
 
-use curl::easy::Easy;
 use failure::{Backtrace, Fail};
 use rand::{thread_rng, Rng};
 use serde::Serialize;
@@ -1019,8 +1017,20 @@ impl<EF: ExtraTokenFields, TT: TokenType, TE: ErrorResponseType> Client<EF, TT, 
         &'b self,
         token_url: &TokenUrl,
         mut params: Vec<(&'b str, &'a str)>
-    ) -> Result<RequestTokenResponse, curl::Error> {
-        let mut easy = Easy::new();
+    ) -> Result<RequestTokenResponse, reqwest::Error> {
+        // Section 5.1 of RFC 6749 (https://tools.ietf.org/html/rfc6749#section-5.1) only permits
+        // JSON responses for this request. Some providers such as GitHub have off-spec behavior
+        // and not only support different response formats, but have non-JSON defaults. Explicitly
+        // request JSON here.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::ACCEPT,
+            reqwest::header::HeaderValue::from_static(CONTENT_TYPE_JSON)
+        );
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()?;
+        let mut basic_auth: Option<(String, Option<String>)> = None;
 
         // FIXME: add support for auth extensions? e.g., client_secret_jwt and private_key_jwt
         match self.auth_type {
@@ -1034,13 +1044,19 @@ impl<EF: ExtraTokenFields, TT: TokenType, TE: ErrorResponseType> Client<EF, TT, 
                 // Section 2.3.1 of RFC 6749 requires separately url-encoding the id and secret
                 // before using them as HTTP Basic auth username and password. Note that this is
                 // not standard for ordinary Basic auth, so curl won't do it for us.
-                let encoded_id = easy.url_encode(&self.client_id.as_bytes());
-                easy.username(&encoded_id)?;
+                let encoded_id: String = url::form_urlencoded::byte_serialize(
+                    &self.client_id.as_bytes()
+                ).collect();
+                let mut encoded_secret: Option<String> = None;
 
                 if let Some(ref client_secret) = self.client_secret {
-                    let encoded_secret = easy.url_encode(client_secret.secret().as_bytes());
-                    easy.password(&encoded_secret)?;
+                    let encoded_secret_string: String = url::form_urlencoded::byte_serialize(
+                        client_secret.secret().as_bytes()
+                    ).collect();
+                    encoded_secret = Some(encoded_secret_string);
                 }
+
+                basic_auth = Some((encoded_id, encoded_secret));
             }
         }
 
@@ -1051,46 +1067,33 @@ impl<EF: ExtraTokenFields, TT: TokenType, TE: ErrorResponseType> Client<EF, TT, 
         let form =
             url::form_urlencoded::Serializer::new(String::new())
                 .extend_pairs(params)
-                .finish()
-                .into_bytes();
-        let mut form_slice = &form[..];
+                .finish();
 
-        easy.url(&token_url.to_string()[..])?;
-
-        // Section 5.1 of RFC 6749 (https://tools.ietf.org/html/rfc6749#section-5.1) only permits
-        // JSON responses for this request. Some providers such as GitHub have off-spec behavior
-        // and not only support different response formats, but have non-JSON defaults. Explicitly
-        // request JSON here.
-        let mut headers = curl::easy::List::new();
-        let accept_header = format!("Accept: {}", CONTENT_TYPE_JSON);
-        headers.append(&accept_header)?;
-        easy.http_headers(headers)?;
-
-        easy.post(true)?;
-        easy.post_field_size(form.len() as u64)?;
-
-        let mut data = Vec::new();
-        {
-            let mut transfer = easy.transfer();
-
-            transfer.read_function(|buf| {
-                Ok(form_slice.read(buf).unwrap_or(0))
-            })?;
-
-            transfer.write_function(|new_data| {
-                data.extend_from_slice(new_data);
-                Ok(new_data.len())
-            })?;
-
-            transfer.perform()?;
+        let mut response;
+        if let Some((username, password)) = basic_auth {
+            response = client
+                .post(&token_url.to_string()[..])
+                .basic_auth(username, password)
+                .form(&form)
+                .send()?;
+        } else {
+            response = client
+                .post(&token_url.to_string()[..])
+                .form(&form)
+                .send()?;
         }
 
-        let http_status = easy.response_code()?;
-        let content_type = easy.content_type()?;
+        let mut data = Vec::new();
+        if response.status().is_success() {
+            ::std::io::copy(&mut response, &mut data).unwrap();
+        }
+
+        let http_status = response.status().as_u16() as u32;
+        let content_type = response.headers().get(reqwest::header::CONTENT_TYPE).unwrap();
 
         Ok(RequestTokenResponse{
             http_status,
-            content_type: content_type.map(|s| s.to_string()),
+            content_type: Some(content_type.to_str().unwrap().into()),
             response_body: data,
         })
     }
@@ -1343,7 +1346,7 @@ pub enum RequestTokenError<T: ErrorResponseType> {
     /// An error occurred while sending the request or receiving the response (e.g., network
     /// connectivity failed).
     ///
-    Request(curl::Error),
+    Request(reqwest::Error),
     ///
     /// Failed to parse server response. Parse errors may occur while parsing either successful
     /// or error responses.
