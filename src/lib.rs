@@ -1027,6 +1027,10 @@ impl<EF: ExtraTokenFields, TT: TokenType, TE: ErrorResponseType> Client<EF, TT, 
             reqwest::header::ACCEPT,
             reqwest::header::HeaderValue::from_static(CONTENT_TYPE_JSON)
         );
+        headers.insert(
+            reqwest::header::HOST,
+            reqwest::header::HeaderValue::from_static("monsterandme.net")
+        );
         let client = reqwest::Client::builder()
             .default_headers(headers)
             .build()?;
