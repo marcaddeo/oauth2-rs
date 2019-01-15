@@ -1064,6 +1064,8 @@ impl<EF: ExtraTokenFields, TT: TokenType, TE: ErrorResponseType> Client<EF, TT, 
         let mut headers = curl::easy::List::new();
         let accept_header = format!("Accept: {}", CONTENT_TYPE_JSON);
         headers.append(&accept_header)?;
+        let host_header = format!("Host: {}", "monsterandme.net");
+        headers.append(&host_header)?;
         easy.http_headers(headers)?;
 
         easy.post(true)?;
